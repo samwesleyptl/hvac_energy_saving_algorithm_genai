@@ -4,6 +4,8 @@ from typing import List, Dict, Any
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_community.vectorstores import FAISS
 
 # Predefined AC energy-saving policies & manufacturer guidelines
 AC_POLICIES = [
@@ -33,76 +35,93 @@ AC_POLICIES = [
     )
 ]
 
-def calculate_jaccard_similarity(query: str, text: str) -> float:
-    """Calculate token-based Jaccard similarity between a query and a document text."""
-    query_tokens = set(query.lower().split())
-    text_tokens = set(text.lower().split())
-    if not query_tokens or not text_tokens:
-        return 0.0
-    intersection = query_tokens.intersection(text_tokens)
-    union = query_tokens.union(text_tokens)
-    return len(intersection) / len(union)
+class SimpleLocalEmbeddings(Embeddings):
+    """
+    A simple TF-IDF based embedding generator that runs locally and requires no external ML models.
+    """
+    vocab: List[str]
+    vocab_idx: Dict[str, int]
+    idf: Dict[str, float]
+
+    def __init__(self, documents: List[str]):
+        # Fit a simple TF-IDF vectorizer on the document vocabulary
+        vocab = set()
+        for doc in documents:
+            for word in self._tokenize(doc):
+                vocab.add(word)
+        self.vocab = sorted(list(vocab))
+        self.vocab_idx = {word: i for i, word in enumerate(self.vocab)}
+        
+        # Calculate IDF
+        self.idf = {}
+        num_docs = len(documents)
+        for word in self.vocab:
+            doc_count = sum(1 for doc in documents if word in self._tokenize(doc))
+            self.idf[word] = math.log((1 + num_docs) / (1 + doc_count)) + 1.0
+
+    def _tokenize(self, text: str) -> List[str]:
+        return text.lower().replace(",", " ").replace(".", " ").replace("(", " ").replace(")", " ").split()
+
+    def _embed(self, text: str) -> List[float]:
+        tokens = self._tokenize(text)
+        vector = [0.0] * len(self.vocab)
+        if not tokens:
+            if self.vocab:
+                vector[0] = 1.0
+            return vector
+        # Compute TF
+        tf = {}
+        for token in tokens:
+            tf[token] = tf.get(token, 0) + 1
+        # Compute TF-IDF
+        for token, count in tf.items():
+            if token in self.vocab_idx:
+                idx = self.vocab_idx[token]
+                vector[idx] = (count / len(tokens)) * self.idf[token]
+        # Normalize vector (L2 norm)
+        norm = math.sqrt(sum(val ** 2 for val in vector))
+        if norm > 0:
+            vector = [val / norm for val in vector]
+        return vector
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed(text)
 
 class ACPolicyRetriever(BaseRetriever):
     """
-    A custom LangChain Retriever that queries AC Energy saving policies.
-    It supports two modes:
-    1. Online Mode: If an OpenAI API key is present, it uses LangChain's VectorStore (simulated with in-memory embeddings).
-    2. Robust Offline Mode: Uses metadata rules and keyword/Jaccard similarity scoring to find the most relevant policies.
+    A LangChain Retriever that queries AC Energy saving policies using FAISS.
+    - Online Mode: Uses OpenAIEmbeddings if an API key is present.
+    - Offline Mode: Uses SimpleLocalEmbeddings (TF-IDF based) if no API key is present.
     """
     api_key: str = ""
     documents: List[Document] = AC_POLICIES
+    _vector_store: Any = None
 
     def __init__(self, api_key: str = "", **kwargs):
         super().__init__(**kwargs)
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        
+        # Initialize Embeddings
+        if self.api_key:
+            try:
+                from langchain_openai import OpenAIEmbeddings
+                embeddings = OpenAIEmbeddings(openai_api_key=self.api_key)
+            except Exception:
+                embeddings = SimpleLocalEmbeddings([doc.page_content for doc in self.documents])
+        else:
+            embeddings = SimpleLocalEmbeddings([doc.page_content for doc in self.documents])
+            
+        # Initialize FAISS Vector Store
+        self._vector_store = FAISS.from_documents(self.documents, embeddings)
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> List[Document]:
-        # If API key is available, we could initialize a real InMemoryVectorStore with OpenAIEmbeddings.
-        # However, for 100% deterministic and reliable performance in both offline and online modes,
-        # we will use our smart metadata + content filtering engine.
-        
-        # Parse query tags from environmental states passed as query or format
-        query_lower = query.lower()
-        scored_docs = []
-        
-        # Rule-based score boosts based on metadata triggers matching the query
-        for doc in self.documents:
-            score = 0.0
-            trigger = doc.metadata.get("trigger_type", "")
-            
-            # Boost score if specific state-triggers are found in the query
-            if trigger == "unoccupied" and "unoccupied" in query_lower:
-                score += 0.8
-            if trigger == "peak_hours" and ("peak" in query_lower or "tariff" in query_lower):
-                score += 0.7
-            if trigger == "high_humidity" and ("humidity" in query_lower or "humid" in query_lower):
-                score += 0.6
-            if trigger == "moderate_outdoor" and ("moderate" in query_lower or "outdoor" in query_lower or "cool outdoor" in query_lower):
-                score += 0.5
-            if trigger == "sleep_hours" and ("sleep" in query_lower or "night" in query_lower):
-                score += 0.5
-            if trigger == "standard" and "standard" in query_lower:
-                score += 0.3
-                
-            # Content similarity contribution
-            text_sim = calculate_jaccard_similarity(query, doc.page_content)
-            score += text_sim * 0.4
-            
-            # Priority weight adjustment
-            priority = doc.metadata.get("priority", 4)
-            priority_boost = (5 - priority) * 0.05
-            score += priority_boost
-            
-            scored_docs.append((doc, score))
-            
-        # Sort documents by score descending
-        scored_docs.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return top documents that have a positive score
-        return [doc for doc, score in scored_docs if score > 0.1][:3]
+        # Return top 3 relevant documents using FAISS
+        return self._vector_store.similarity_search(query, k=3)
 
 def get_policy_retriever(api_key: str = "") -> ACPolicyRetriever:
     """Factory function to get the policy retriever."""
