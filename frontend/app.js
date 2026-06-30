@@ -5,9 +5,16 @@
 (function() {
     'use strict';
 
-    // ---- Config ----
+    // ---- Config & State ----
     const API_BASE = window.location.origin;
-    let apiKey = '';
+    let keyProvider = localStorage.getItem('ac_key_provider') || 'gemini';
+    let apiKeyGemini = localStorage.getItem('ac_api_key_gemini') || '';
+    let apiKeyOpenAI = localStorage.getItem('ac_api_key_openai') || '';
+    
+    function getActiveKey() {
+        return keyProvider === 'gemini' ? apiKeyGemini : apiKeyOpenAI;
+    }
+
     let autoSimulate = false;
     let autoInterval = null;
     const SIM_INTERVAL_MS = 2000; // tick every 2 seconds
@@ -65,9 +72,27 @@
         
         btnApiKey: $('#btnApiKey'),
         modalOverlay: $('#modalOverlay'),
-        inputApiKey: $('#inputApiKey'),
         btnModalCancel: $('#btnModalCancel'),
         btnModalSave: $('#btnModalSave'),
+        
+        // Tab elements
+        btnTabLog: $('#btnTabLog'),
+        btnTabAssistant: $('#btnTabAssistant'),
+        tabContentLog: $('#tabContentLog'),
+        tabContentAssistant: $('#tabContentAssistant'),
+        
+        // Chat elements
+        chatMessages: $('#chatMessages'),
+        chatInput: $('#chatInput'),
+        btnSendChat: $('#btnSendChat'),
+        chatSuggestions: $('#chatSuggestions'),
+        
+        // Multi-API Key Modal controls
+        selectKeyType: $('#selectKeyType'),
+        inputGeminiKey: $('#inputGeminiKey'),
+        inputOpenaiKey: $('#inputOpenaiKey'),
+        containerGeminiKey: $('#containerGeminiKey'),
+        containerOpenaiKey: $('#containerOpenaiKey')
     };
 
     let occupancy = true;
@@ -314,7 +339,7 @@
         
         resetGraphNodes();
         
-        const state = await apiPost('/api/optimize', { api_key: apiKey });
+        const state = await apiPost('/api/optimize', { api_key: getActiveKey(), key_type: keyProvider });
         
         if (state && state.agent_decision) {
             const dec = state.agent_decision;
@@ -337,7 +362,7 @@
     }
 
     async function runSimStep() {
-        const state = await apiPost('/api/step', { api_key: apiKey });
+        const state = await apiPost('/api/step', { api_key: getActiveKey(), key_type: keyProvider });
         if (state && state.agent_decision) {
             const dec = state.agent_decision;
             displayPolicies(dec.policies);
@@ -378,20 +403,163 @@
     // ---- API Key Modal ----
     function openModal() {
         dom.modalOverlay.classList.add('show');
-        dom.inputApiKey.value = apiKey;
-        dom.inputApiKey.focus();
+        dom.selectKeyType.value = keyProvider;
+        dom.inputGeminiKey.value = apiKeyGemini;
+        dom.inputOpenaiKey.value = apiKeyOpenAI;
+        toggleKeyInputs();
+        
+        // Focus the appropriate input
+        if (keyProvider === 'gemini') {
+            dom.inputGeminiKey.focus();
+        } else {
+            dom.inputOpenaiKey.focus();
+        }
     }
+    
+    function toggleKeyInputs() {
+        const type = dom.selectKeyType.value;
+        if (type === 'gemini') {
+            dom.containerGeminiKey.style.display = 'block';
+            dom.containerOpenaiKey.style.display = 'none';
+        } else {
+            dom.containerGeminiKey.style.display = 'none';
+            dom.containerOpenaiKey.style.display = 'block';
+        }
+    }
+    
     function closeModal() {
         dom.modalOverlay.classList.remove('show');
     }
+    
     function saveApiKey() {
-        apiKey = dom.inputApiKey.value.trim();
+        keyProvider = dom.selectKeyType.value;
+        apiKeyGemini = dom.inputGeminiKey.value.trim();
+        apiKeyOpenAI = dom.inputOpenaiKey.value.trim();
+        
+        localStorage.setItem('ac_key_provider', keyProvider);
+        localStorage.setItem('ac_api_key_gemini', apiKeyGemini);
+        localStorage.setItem('ac_api_key_openai', apiKeyOpenAI);
+        
         closeModal();
-        if (apiKey) {
-            addLog('OpenAI API key set. LLM-powered reasoning enabled.', 'success');
+        
+        const activeKey = getActiveKey();
+        const providerName = keyProvider === 'gemini' ? 'Google Gemini' : 'OpenAI';
+        
+        if (activeKey) {
+            addLog(`${providerName} API key set. LLM agentic features active.`, 'success');
         } else {
-            addLog('API key cleared. Using built-in rule engine.', 'info');
+            addLog(`API key cleared. Running in local fallback rules mode.`, 'info');
         }
+    }
+
+    // ---- Tabs Switching ----
+    function switchTab(tab) {
+        if (tab === 'log') {
+            dom.btnTabLog.classList.add('active');
+            dom.btnTabAssistant.classList.remove('active');
+            dom.tabContentLog.classList.add('active');
+            dom.tabContentAssistant.classList.remove('active');
+        } else {
+            dom.btnTabLog.classList.remove('active');
+            dom.btnTabAssistant.classList.add('active');
+            dom.tabContentLog.classList.remove('active');
+            dom.tabContentAssistant.classList.add('active');
+            // Scroll chat to bottom
+            dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+        }
+    }
+
+    // ---- Chat Logic ----
+    let chatHistory = [];
+
+    function appendChatMessage(sender, content, isTool = false) {
+        const bubble = document.createElement('div');
+        if (isTool) {
+            bubble.className = 'chat-bubble chat-tool';
+            bubble.innerHTML = `⚙️ <span>${escapeHtml(content)}</span>`;
+        } else {
+            bubble.className = `chat-bubble chat-${sender}`;
+            const inner = document.createElement('div');
+            inner.className = 'bubble-content';
+            inner.innerHTML = escapeHtml(content).replace(/\n/g, '<br>');
+            bubble.appendChild(inner);
+        }
+        dom.chatMessages.appendChild(bubble);
+        dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+    }
+
+    function appendTypingIndicator() {
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble chat-agent';
+        bubble.id = 'chatTypingIndicator';
+        bubble.innerHTML = `
+            <div class="typing-indicator-dots">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+            </div>
+        `;
+        dom.chatMessages.appendChild(bubble);
+        dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+    }
+
+    function removeTypingIndicator() {
+        const el = document.getElementById('chatTypingIndicator');
+        if (el) el.remove();
+    }
+
+    async function sendChatMessage(messageText) {
+        if (!messageText) return;
+        
+        appendChatMessage('user', messageText);
+        appendTypingIndicator();
+        
+        const activeKey = getActiveKey();
+        const payload = {
+            message: messageText,
+            history: chatHistory,
+            api_key: activeKey,
+            key_type: keyProvider
+        };
+        
+        const result = await apiPost('/api/chat', payload);
+        removeTypingIndicator();
+        
+        if (result) {
+            if (result.tool_calls && result.tool_calls.length > 0) {
+                result.tool_calls.forEach(tc => {
+                    const argStr = JSON.stringify(tc.args);
+                    appendChatMessage('agent', `Executed tool: ${tc.name}(${argStr}) → ${tc.result}`, true);
+                });
+            }
+            
+            appendChatMessage('agent', result.response);
+            
+            chatHistory.push({ role: 'user', content: messageText });
+            chatHistory.push({ role: 'assistant', content: result.response });
+            
+            if (chatHistory.length > 20) {
+                chatHistory = chatHistory.slice(-20);
+            }
+            
+            if (result.simulator_state) {
+                updateDashboard(result.simulator_state);
+            }
+        } else {
+            appendChatMessage('agent', 'I encountered an error trying to process that request. Please try again.');
+        }
+    }
+
+    function initChatSuggestions() {
+        dom.chatSuggestions.addEventListener('click', (e) => {
+            const chip = e.target.closest('.chip');
+            if (chip) {
+                const msg = chip.getAttribute('data-msg');
+                if (msg) {
+                    sendChatMessage(msg);
+                }
+            }
+        });
     }
 
     // ---- Event Bindings ----
@@ -400,18 +568,62 @@
         dom.btnRunOptimize.addEventListener('click', runOptimization);
         dom.btnAutoToggle.addEventListener('click', toggleAutoSimulate);
         dom.btnResetMetrics.addEventListener('click', resetMetrics);
+        
+        // Log clear vs Chat send
         dom.btnClearLog.addEventListener('click', () => {
-            dom.logContainer.innerHTML = '<div class="log-entry log-info">Log cleared.</div>';
+            const activeTab = $('.tab-btn.active').getAttribute('data-tab');
+            if (activeTab === 'log') {
+                dom.logContainer.innerHTML = '<div class="log-entry log-info">Log cleared.</div>';
+            } else {
+                dom.chatMessages.innerHTML = `
+                    <div class="chat-bubble chat-agent">
+                        <div class="bubble-content">Chat history cleared. How can I help you optimize your AC settings?</div>
+                    </div>
+                `;
+                chatHistory = [];
+            }
         });
+        
+        // Tabs triggers
+        dom.btnTabLog.addEventListener('click', () => switchTab('log'));
+        dom.btnTabAssistant.addEventListener('click', () => switchTab('assistant'));
+        
+        // Chat Actions
+        dom.btnSendChat.addEventListener('click', () => {
+            const val = dom.chatInput.value.trim();
+            if (val) {
+                sendChatMessage(val);
+                dom.chatInput.value = '';
+            }
+        });
+        
+        dom.chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const val = dom.chatInput.value.trim();
+                if (val) {
+                    sendChatMessage(val);
+                    dom.chatInput.value = '';
+                }
+            }
+        });
+        
+        initChatSuggestions();
+        
+        // API Key Modal Trigger & Action Handlers
         dom.btnApiKey.addEventListener('click', openModal);
         dom.btnModalCancel.addEventListener('click', closeModal);
         dom.btnModalSave.addEventListener('click', saveApiKey);
+        dom.selectKeyType.addEventListener('change', toggleKeyInputs);
+        
         dom.modalOverlay.addEventListener('click', (e) => {
             if (e.target === dom.modalOverlay) closeModal();
         });
 
-        // Keyboard shortcut: Enter to save in modal
-        dom.inputApiKey.addEventListener('keydown', (e) => {
+        // Keypress overrides inside Modal Inputs
+        dom.inputGeminiKey.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') saveApiKey();
+        });
+        dom.inputOpenaiKey.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') saveApiKey();
         });
     }
@@ -421,6 +633,10 @@
         initSliders();
         initOccupancyToggle();
         bindEvents();
+        
+        // Clear log button label change depending on tab context
+        dom.btnTabLog.addEventListener('click', () => dom.btnClearLog.textContent = 'Clear Log');
+        dom.btnTabAssistant.addEventListener('click', () => dom.btnClearLog.textContent = 'Clear Chat');
         
         // Fetch initial state from server
         addLog('Connecting to SmartAC Agent backend...', 'info');
@@ -438,6 +654,12 @@
             occupancy = state.occupancy;
             dom.btnOccupancy.classList.toggle('active', occupancy);
             dom.occupancyText.textContent = occupancy ? 'Occupied' : 'Unoccupied';
+            
+            const activeKey = getActiveKey();
+            if (activeKey) {
+                const providerName = keyProvider === 'gemini' ? 'Google Gemini' : 'OpenAI';
+                addLog(`Restored saved ${providerName} key from localStorage.`, 'info');
+            }
         } else {
             addLog('Could not connect to backend. Please ensure the server is running on ' + API_BASE, 'warning');
             setStatus('Disconnected');

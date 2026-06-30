@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from backend.simulator import ACSimulator
 from backend.agent import optimize_ac_settings
+from backend.chat_agent import run_chat_agent
 
 app = FastAPI(title="Smart AC Energy Saving Agent API")
 
@@ -32,6 +33,17 @@ class StateUpdateSchema(BaseModel):
 
 class OptimizeRequestSchema(BaseModel):
     api_key: Optional[str] = None
+    key_type: Optional[str] = None
+
+class ChatMessageSchema(BaseModel):
+    role: str
+    content: str
+
+class ChatRequestSchema(BaseModel):
+    message: str
+    history: List[ChatMessageSchema] = []
+    api_key: Optional[str] = None
+    key_type: Optional[str] = None
 
 @app.get("/api/state")
 def get_state():
@@ -55,14 +67,18 @@ def update_state(data: StateUpdateSchema):
     return simulator.get_state()
 
 @app.post("/api/step")
-def run_step(auto_optimize: bool = True, api_key: Optional[str] = Body(None, embed=True)):
+def run_step(
+    auto_optimize: bool = True, 
+    api_key: Optional[str] = Body(None, embed=True), 
+    key_type: Optional[str] = Body(None, embed=True)
+):
     """
     Advance the simulator environment by 5 minutes.
     If auto_optimize is True, runs the LangGraph optimizer node first and applies recommendations.
     """
     if auto_optimize:
         # Run agent optimization
-        rec = optimize_ac_settings(simulator.get_state(), api_key=api_key or "")
+        rec = optimize_ac_settings(simulator.get_state(), api_key=api_key or "", key_type=key_type or "")
         simulator.update_settings(
             power=rec["power"],
             setpoint=rec["setpoint"],
@@ -86,7 +102,8 @@ def run_optimization(payload: Optional[OptimizeRequestSchema] = None):
     apply recommendations to the AC, and return decision details + node execution path.
     """
     key = payload.api_key if payload else ""
-    rec = optimize_ac_settings(simulator.get_state(), api_key=key or "")
+    ktype = payload.key_type if payload else ""
+    rec = optimize_ac_settings(simulator.get_state(), api_key=key or "", key_type=ktype or "")
     
     # Apply settings to simulator
     simulator.update_settings(
@@ -99,6 +116,29 @@ def run_optimization(payload: Optional[OptimizeRequestSchema] = None):
     state = simulator.get_state()
     state["agent_decision"] = rec
     return state
+
+@app.post("/api/chat")
+def chat_with_agent(payload: ChatRequestSchema):
+    """
+    Interact with the AC Agent using natural language.
+    Executes tool-calling actions on the simulator and returns response + tool traces.
+    """
+    try:
+        history_dicts = [{"role": h.role, "content": h.content} for h in payload.history]
+        result = run_chat_agent(
+            message=payload.message,
+            history=history_dicts,
+            api_key=payload.api_key or "",
+            key_type=payload.key_type or "",
+            simulator=simulator
+        )
+        return {
+            "response": result["response"],
+            "tool_calls": result["tool_calls"],
+            "simulator_state": simulator.get_state()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat Agent Error: {str(e)}")
 
 @app.post("/api/reset")
 def reset_accumulators():

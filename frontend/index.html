@@ -228,14 +228,44 @@
                 </div>
             </div>
 
-            <!-- Agent Reasoning Log Panel -->
-            <div class="card card-log" id="cardLog">
-                <div class="card-header">
-                    <h2>Agent Reasoning</h2>
-                    <button class="btn btn-outline btn-sm" id="btnClearLog">Clear</button>
+            <!-- Agent Reasoning / Assistant Tabbed Panel -->
+            <div class="card card-log-assistant" id="cardLogAssistant">
+                <div class="card-header tab-header">
+                    <div class="tabs">
+                        <button class="tab-btn active" data-tab="log" id="btnTabLog">Reasoning Log</button>
+                        <button class="tab-btn" data-tab="assistant" id="btnTabAssistant">AI Assistant</button>
+                    </div>
+                    <button class="btn btn-outline btn-sm" id="btnClearLog">Clear Log</button>
                 </div>
-                <div class="log-container" id="logContainer">
-                    <div class="log-entry log-info">System initialized. Adjust environment parameters and run the LangGraph optimization agent.</div>
+                
+                <!-- Tab Content: Reasoning Log -->
+                <div class="tab-content active" id="tabContentLog">
+                    <div class="log-container" id="logContainer">
+                        <div class="log-entry log-info">System initialized. Adjust environment parameters and run the LangGraph optimization agent.</div>
+                    </div>
+                </div>
+                
+                <!-- Tab Content: AI Assistant -->
+                <div class="tab-content" id="tabContentAssistant">
+                    <div class="chat-container">
+                        <div class="chat-messages" id="chatMessages">
+                            <div class="chat-bubble chat-agent">
+                                <div class="bubble-content">
+                                    Hello! I am your SmartAC Conversational Agent. You can chat with me or instruct me to adjust thermostat settings, query efficiency policies, or optimize parameters. Try clicking one of the suggestions below!
+                                </div>
+                            </div>
+                        </div>
+                        <div class="chat-suggestions" id="chatSuggestions">
+                            <button class="chip" data-msg="Show current AC status">📊 Status</button>
+                            <button class="chip" data-msg="Run energy optimization">⚡ Optimize AC</button>
+                            <button class="chip" data-msg="What is the policy for unoccupied rooms?">📚 Occupancy Rule</button>
+                            <button class="chip" data-msg="Set comfort target to 24 degrees">🌡️ Set Target to 24°C</button>
+                        </div>
+                        <div class="chat-input-bar">
+                            <input type="text" id="chatInput" placeholder="Ask me to adjust settings, check state..." autocomplete="off">
+                            <button id="btnSendChat" class="btn btn-primary btn-sm">Send</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -244,9 +274,27 @@
     <!-- API Key Modal -->
     <div class="modal-overlay" id="modalOverlay">
         <div class="modal-card">
-            <h3>Set OpenAI API Key</h3>
-            <p>Provide an OpenAI API key to enable LLM-powered reasoning. Leave empty to use the built-in rule engine.</p>
-            <input type="password" id="inputApiKey" placeholder="sk-..." autocomplete="off">
+            <h3>Configure API Keys</h3>
+            <p>Provide an API key to enable LLM-powered optimization and conversational tool-calling agent capabilities.</p>
+            
+            <div class="modal-form-group">
+                <label for="selectKeyType" style="display: block; margin-bottom: 6px; font-weight: 500;">Active LLM Provider:</label>
+                <select id="selectKeyType" class="select-dropdown" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(30, 40, 70, 0.8); border: 1px solid var(--glass-border); color: var(--color-text); margin-bottom: 15px;">
+                    <option value="gemini">Google Gemini (Recommended)</option>
+                    <option value="openai">OpenAI GPT</option>
+                </select>
+            </div>
+            
+            <div class="modal-form-group key-input-container" id="containerGeminiKey">
+                <label for="inputGeminiKey" style="display: block; margin-bottom: 6px; font-weight: 500;">Gemini API Key:</label>
+                <input type="password" id="inputGeminiKey" placeholder="AIzaSy..." autocomplete="off" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(20, 25, 45, 0.8); border: 1px solid var(--glass-border); color: var(--color-text); margin-bottom: 15px;">
+            </div>
+            
+            <div class="modal-form-group key-input-container" id="containerOpenaiKey" style="display: none;">
+                <label for="inputOpenaiKey" style="display: block; margin-bottom: 6px; font-weight: 500;">OpenAI API Key:</label>
+                <input type="password" id="inputOpenaiKey" placeholder="sk-..." autocomplete="off" style="width: 100%; padding: 10px; border-radius: 6px; background: rgba(20, 25, 45, 0.8); border: 1px solid var(--glass-border); color: var(--color-text); margin-bottom: 15px;">
+            </div>
+            
             <div class="modal-actions">
                 <button class="btn btn-outline" id="btnModalCancel">Cancel</button>
                 <button class="btn btn-primary" id="btnModalSave">Save</button>

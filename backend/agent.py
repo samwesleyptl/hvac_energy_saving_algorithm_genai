@@ -19,6 +19,7 @@ class AgentState(TypedDict):
     
     # Internal variables
     api_key: Optional[str]
+    key_type: Optional[str]
     retrieved_policies: List[str]
     
     # Outputs recommended by Agent
@@ -71,18 +72,89 @@ def optimize_settings_node(state: AgentState) -> Dict[str, Any]:
     nodes = list(state.get("nodes_executed", []))
     nodes.append("optimize_settings")
     
-    api_key = state.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+    api_key = state.get("api_key") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+    key_type = state.get("key_type")
+    if api_key and not key_type:
+        key_type = "gemini" if api_key.startswith("AIzaSy") else "openai"
     
-    # Check if we can run online model using LangChain OpenAI
+    fallback_explanation = ""
+    
     if api_key:
-        try:
-            from langchain_openai import ChatOpenAI
-            from langchain_core.prompts import ChatPromptTemplate
-            from langchain_core.output_parsers import JsonOutputParser
-            
-            # Setup prompt template
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", """You are an intelligent HVAC Energy Optimizer. Your goal is to maximize energy savings while maintaining reasonable user comfort.
+        if key_type == "gemini":
+            try:
+                import requests
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                
+                system_instruction = """You are an intelligent HVAC Energy Optimizer. Your goal is to maximize energy savings while maintaining reasonable user comfort.
+You will receive the current room parameters and a set of retrieved policy guidelines.
+Analyze the policies and environmental conditions to output the optimal AC settings.
+
+You MUST return your output in JSON format with EXACTLY the following structure:
+{
+  "power": "ON" or "OFF",
+  "setpoint": float (thermostat setting in °C, must be between 18.0 and 30.0),
+  "fan_speed": "Low", "Medium", or "High",
+  "mode": "Cool", "Eco", "Dry", or "Fan",
+  "estimated_savings_pct": float (from 0 to 100, estimate the savings this optimization achieves relative to running normal cooling),
+  "explanation": "A concise step-by-step description of why these settings were selected, referencing the applicable policies."
+}"""
+
+                policies_text = "\n".join([f"- {p}" for p in state["retrieved_policies"]])
+                user_prompt = f"""### Environmental parameters:
+- Indoor Temperature: {state["indoor_temp"]}°C
+- Outdoor Temperature: {state["outdoor_temp"]}°C
+- Target Comfort Temperature: {state["target_temp"]}°C
+- Occupancy: {"Yes" if state["occupancy"] else "No"} (Is someone in the room?)
+- Humidity: {state["humidity"]}%
+- Peak tariff hour: {"Yes" if state["is_peak_hours"] else "No"} (Electricity rate is {state["electricity_rate"]} USD/kWh)
+- Time of Day: {state["time_of_day"]}
+
+### Retrieved Policies:
+{policies_text}
+
+Provide the optimized AC settings in JSON format:"""
+
+                payload = {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": f"{system_instruction}\n\n{user_prompt}"}]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.0,
+                        "responseMimeType": "application/json"
+                    }
+                }
+                
+                response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+                response.raise_for_status()
+                res_json = response.json()
+                
+                text_content = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                res = json.loads(text_content.strip())
+                
+                return {
+                    "recommended_power": res.get("power", "ON"),
+                    "recommended_setpoint": float(res.get("setpoint", state["target_temp"])),
+                    "recommended_fan_speed": res.get("fan_speed", "Medium"),
+                    "recommended_mode": res.get("mode", "Cool"),
+                    "estimated_savings_pct": float(res.get("estimated_savings_pct", 0.0)),
+                    "explanation": res.get("explanation", "Optimized using Gemini API."),
+                    "nodes_executed": nodes
+                }
+            except Exception as e:
+                fallback_explanation = f"[Gemini API Error: {str(e)}. Using fallback engine]"
+                
+        else: # openai
+            try:
+                from langchain_openai import ChatOpenAI
+                from langchain_core.prompts import ChatPromptTemplate
+                from langchain_core.output_parsers import JsonOutputParser
+                
+                # Setup prompt template
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", """You are an intelligent HVAC Energy Optimizer. Your goal is to maximize energy savings while maintaining reasonable user comfort.
 You will receive the current room parameters and a set of retrieved policy guidelines.
 Analyze the policies and environmental conditions to output the optimal AC settings.
 
@@ -95,7 +167,7 @@ You MUST return your output in JSON format with EXACTLY the following structure:
   "estimated_savings_pct": float (from 0 to 100, estimate the savings this optimization achieves relative to running normal cooling),
   "explanation": "A concise step-by-step description of why these settings were selected, referencing the applicable policies."
 }}"""),
-                ("user", """### Environmental parameters:
+                    ("user", """### Environmental parameters:
 - Indoor Temperature: {indoor_temp}°C
 - Outdoor Temperature: {outdoor_temp}°C
 - Target Comfort Temperature: {target_temp}°C
@@ -108,42 +180,40 @@ You MUST return your output in JSON format with EXACTLY the following structure:
 {policies_text}
 
 Provide the optimized AC settings in JSON format:""")
-            ])
-            
-            # Format policies
-            policies_text = "\n".join([f"- {p}" for p in state["retrieved_policies"]])
-            
-            # Bind model
-            model = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.0, openai_api_key=api_key)
-            chain = prompt | model | JsonOutputParser()
-            
-            res = chain.invoke({
-                "indoor_temp": state["indoor_temp"],
-                "outdoor_temp": state["outdoor_temp"],
-                "target_temp": state["target_temp"],
-                "occupancy": "Yes" if state["occupancy"] else "No",
-                "humidity": state["humidity"],
-                "is_peak_hours": "Yes" if state["is_peak_hours"] else "No",
-                "electricity_rate": state["electricity_rate"],
-                "time_of_day": state["time_of_day"],
-                "policies_text": policies_text
-            })
-            
-            return {
-                "recommended_power": res.get("power", "ON"),
-                "recommended_setpoint": float(res.get("setpoint", state["target_temp"])),
-                "recommended_fan_speed": res.get("fan_speed", "Medium"),
-                "recommended_mode": res.get("mode", "Cool"),
-                "estimated_savings_pct": float(res.get("estimated_savings_pct", 0.0)),
-                "explanation": res.get("explanation", "Optimized using OpenAI LangChain agent."),
-                "nodes_executed": nodes
-            }
-            
-        except Exception as e:
-            # Fallback to rule engine on API error
-            fallback_explanation = f"[LLM API Error: {str(e)}. Using fallback engine]"
-    else:
-        fallback_explanation = ""
+                ])
+                
+                # Format policies
+                policies_text = "\n".join([f"- {p}" for p in state["retrieved_policies"]])
+                
+                # Bind model
+                model = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.0, openai_api_key=api_key)
+                chain = prompt | model | JsonOutputParser()
+                
+                res = chain.invoke({
+                    "indoor_temp": state["indoor_temp"],
+                    "outdoor_temp": state["outdoor_temp"],
+                    "target_temp": state["target_temp"],
+                    "occupancy": "Yes" if state["occupancy"] else "No",
+                    "humidity": state["humidity"],
+                    "is_peak_hours": "Yes" if state["is_peak_hours"] else "No",
+                    "electricity_rate": state["electricity_rate"],
+                    "time_of_day": state["time_of_day"],
+                    "policies_text": policies_text
+                })
+                
+                return {
+                    "recommended_power": res.get("power", "ON"),
+                    "recommended_setpoint": float(res.get("setpoint", state["target_temp"])),
+                    "recommended_fan_speed": res.get("fan_speed", "Medium"),
+                    "recommended_mode": res.get("mode", "Cool"),
+                    "estimated_savings_pct": float(res.get("estimated_savings_pct", 0.0)),
+                    "explanation": res.get("explanation", "Optimized using OpenAI LangChain agent."),
+                    "nodes_executed": nodes
+                }
+                
+            except Exception as e:
+                # Fallback to rule engine on API error
+                fallback_explanation = f"[OpenAI API Error: {str(e)}. Using fallback engine]"
 
     # Rule-Based Heuristic Optimization Engine (Simulates LLM Cognitive Logic)
     target = state["target_temp"]
@@ -299,7 +369,7 @@ def build_agent_graph() -> StateGraph:
 # Compile the graph
 agent_graph = build_agent_graph()
 
-def optimize_ac_settings(sim_state: Dict[str, Any], api_key: str = "") -> Dict[str, Any]:
+def optimize_ac_settings(sim_state: Dict[str, Any], api_key: str = "", key_type: str = "") -> Dict[str, Any]:
     """
     Executes the compiled LangGraph workflow using the simulator's current state.
     Returns the recommendations and execution trace.
@@ -315,6 +385,7 @@ def optimize_ac_settings(sim_state: Dict[str, Any], api_key: str = "") -> Dict[s
         "time_of_day": sim_state["time_of_day"],
         
         "api_key": api_key,
+        "key_type": key_type,
         "retrieved_policies": [],
         
         "recommended_power": "ON",
